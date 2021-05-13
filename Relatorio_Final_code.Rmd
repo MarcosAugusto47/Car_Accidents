@@ -1,0 +1,417 @@
+---
+title: "Reduzindo mortalidade no tráfego por aprendizado não supervisionado"
+author: "Grupo 5"
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require(knitr)
+require(kableExtra)
+options(knitr.kable.NA = '')
+```
+
+# 1. O banco de dados e o seu formato
+
+![](car_accident.jpeg)
+
+Nos Estados Unidos, a taxa de acidentes rodoviários fatais vem diminuindo constantemente desde os anos 80, porém, nos últimos dez anos, houve uma estagnação nessa redução. Juntamente com o aumento do número de milhas percorridas no país, o número total de mortes devido ao tráfego atingiu o maior valor da última década e está aumentando rapidamente.
+
+Por pedido do Departamento de Transportes dos Estados Unidos, foi investigado como elaborar uma estratégia para reduzir a incidência de acidentes de trânsito em todo o país. Observando demograficamente as vítimas de acidentes de trânsito de cada estado dos Estados Unidos, foi descoberto que há muita variação entre os estados. Agora, procura-se verificar se existem padrões nessa variação para fornecer sugestões para um plano de ação de políticas públicas. Em particular, em vez de implementar um plano nacional financeiramente custoso, concentra-se em grupos de estados com perfis semelhantes. O objetivo é encontrar grupos de maneira estatisticamente sólida e comunicar o resultado de forma eficaz.
+
+Para realizar essas tarefas, será utilizado manipulação de dados, análise gráfica, redução de dimensionalidade e aprendizado não supervisionado.
+
+Os dados fornecidos foram originalmente coletados pela Administração Nacional de Segurança no Trânsito nas Rodovias e pela Associação Nacional de Comissários de Seguros. Esse conjunto de dados específico foi compilado e lançado como um arquivo CSV pelo FiveThirtyEight sob a licença CC-BY4.0.
+
+```{r}
+# Verifica o nome do diretório atual
+(current_dir <- getwd())
+
+# Lista os nomes dos arquivos presentes na pasta
+(file_list <- list.files())
+
+# visualiza as primeiras 20 linhas de road-accidents.csv
+(accidents_head <- readLines("road-accidents.txt", n=20))
+```
+
+# 2. Importação e verificação da estrutura do banco de dados
+
+O banco de dados está delimitado pela barra reta '|' e contém 5 variáveis:
+
+* Estado nos Estados Unidos;
+* Número de motoristas envolvidos em acidentes fatais por bilhão de milhas;
+* Percentual de motoristas envolvidos em acidentes fatais que estavam acima da velocidade da via;
+* Percentual de motoristas envolvidos em acidentes fatais que estavam embriagados;
+* Percentual de motoristas envolvidos em acidentes fatais que nunca estiveram envolvidos em algum acidente previamente.
+
+```{r, warning=FALSE, results=FALSE, message=FALSE}
+# Carrega a biblioteca de pacotes tidyverse
+require(tidyverse)
+
+# Importação de road-accidents.csv
+car_acc <- read_delim("road-accidents.txt", comment = '#', delim = '|')
+
+# Renomeia as variáveis
+car_new <- car_acc
+colnames(car_new) <- c('Estado', 'Taxa Fatal', 
+                      '% - Velocidade', '% - Alcoolizado', 
+                      '% - Não Reincidente')
+```
+
+```{r}
+# Salva o número de linhas e colunas
+(rows_and_cols <- dim(car_new))
+
+# Verifica a estrutura do banco de dados
+str(car_new)
+
+# Visualiza as últimas 6 linhas do banco
+car_new %>% tail() %>% kable() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+# 3. Resumo dos dados
+
+Para compreender melhor o banco de dados, são calculadas medidas-resumos e gráficos são elaboradas, referentes ao banco de dados. A visualização gráfica é últil para ter um conhecimento prévio sobre a distribuição das variáveis. Geralmente, é uma boa idéia verificar a relação entre as colunas duas a duas através de um gráfico de dispersão pareado.
+
+```{r, message=FALSE, warning=FALSE}
+dat_summ <- summary(car_new)
+kable(dat_summ) %>% kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+
+# Retira a coluna de estado para a construção do gráfico de dispersão pareado
+require(GGally)
+car_new %>% 
+  select(-Estado) %>%
+  ggpairs() + theme_bw()
+```
+
+# 4. Quantificação da associação de características e acidentes
+Já pode-se verificar algumas relações interessantes entre a variável alvo (o número de acidentes fatais) e as variáveis auxiliares (percentual de velocidade, percentual de motoristas alcoolizados e percentual de motoristas com acidentes não reincidentes).
+
+Para quantificar as relações observadas nos gráficos de dispersão, calcula-se a matriz de coeficientes de correlação de Pearson. O coeficiente de correlação de Pearson é um dos métodos mais comuns para quantificar a correlação entre variáveis e, por convenção, os seguintes limites foram usados para o valor absoluto do mesmo:
+
+* Até 0,2 = correlação muito fraca;
+* De 0,2 até 0,5 = correlação fraca;
+* De 0,5 até 0,8 = correlação moderada;
+* De 0,8 até 0,9 = correlação forte;
+* A partir de 0,9 = correlação muito forte.
+
+```{r}
+# Usando pipes, remove a coluna Estado e calcula o coeficiente de correlação para todos os pares
+corr_col <- car_new %>%
+  select(-Estado) %>%
+  cor()
+corr_col %>% kable() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+# 5. Ajuste de modelos de regressão linear
+
+Na tabela de correlação, vê-se que a quantidade de acidentes fatais está mais correlacionada com o consumo de álcool (primeira linha). Além disso, também percebe-se que algumas das variáveis auxiliares estão correlacionados entre si, por exemplo, velocidade e consumo de álcool estão positivamente correlacionados. Portanto, existe interesse em calcular a associação da variável alvo com cada variável auxiliar, enquanto considera-se o efeito das demais variáveis auxiliares. Isso pode ser feito usando regressão linear.
+
+Tanto a regressão linear quanto a correlação medem quanto as demais variáveis estão associadas ao resultado (acidentes fatais). Ao comparar os coeficientes de regressão com os coeficientes de correlação, ficará evidente que eles são ligeiramente diferentes. A razão para isso é que a regressão linear calcula a associação de uma variável a um resultado, dada a associação com todas as outras variáveis, o que não é considerado no cálculo dos coeficientes de correlação.
+
+Um caso interessante é quando o coeficiente de correlação e o coeficiente de regressão das mesmas característica têm sinais opostos. Por exemplo, quando uma variável A está correlacionada positivamente com o resultado Y, mas também correlacionado positivamente com uma variável diferente B, isso tem um efeito negativo em Y, então a correlação indireta (A -> B -> Y) pode sobrecarregar a correlação direta (A- > Y). Nesse caso, o coeficiente de regressão para a variável A pode ser positivo, enquanto o coeficiente de correlação linear é negativo. Isso, às vezes, é chamado de multicolinearidade. Será estudado se a regressão múltipla pode revelar esse fenômeno.
+
+Foram ajustados oito modelos:
+
+* Apenas com intercepto;
+* Apenas com % - Velocidade;
+* Apenas com % - Alcoolizado;
+* Apenas com % - Não Reincidente;
+* Apenas com % - Velocidade e % - Alcoolizado;
+* Apenas com % - Velocidade e % - Não Reincidente;
+* Apenas com % - Alcoolizado e % - Não Reincidente;
+* Com as 3 variáveis auxiliares.
+
+```{r}
+# Use lm para ajustar os modelos de regressão linear
+mod1 <- lm(`Taxa Fatal` ~ -1, data = car_new)
+mod2 <- lm(`Taxa Fatal` ~ `% - Velocidade`, data = car_new)
+mod3 <- lm(`Taxa Fatal` ~ `% - Alcoolizado`, data = car_new)
+mod4 <- lm(`Taxa Fatal` ~ `% - Não Reincidente`, data = car_new)
+mod5 <- lm(`Taxa Fatal` ~ `% - Velocidade` + `% - Alcoolizado`, data = car_new)
+mod6 <- lm(`Taxa Fatal` ~ `% - Velocidade` + `% - Não Reincidente`, data = car_new)
+mod7 <- lm(`Taxa Fatal` ~ `% - Alcoolizado` + `% - Não Reincidente`, data = car_new)
+mod8 <- lm(`Taxa Fatal` ~ . - Estado, data = car_new)
+
+# Coeficientes de regressão e resumo do modelo
+summary(mod1);
+coef(mod2);summary(mod2)
+coef(mod3);summary(mod3)
+coef(mod4);summary(mod4)
+coef(mod5);summary(mod5)
+coef(mod6);summary(mod6)
+coef(mod7);summary(mod7)
+coef(mod8);summary(mod8)
+```
+
+# 6. Executando análise de componentes principais nos dados padronizados
+
+Verificou-se que o consumo de álcool está fracamente associado ao número de acidentes fatais nos estados. Isso pode levar a concluir que o consumo de álcool deve ser o foco de novas investigações e talvez as estratégias devam dividir os estados entre alto ou baixo consumo de álcool nos acidentes. Mas também existem associações entre o consumo de álcool e os outras duas características, então pode valer a pena tentar dividir os estados de uma maneira que represente todas as três características.
+
+Uma maneira de agrupar os dados é usar a análise de componentes principais para visualizar dados em espaço dimensional reduzido, em que pode-se tentar captar padrões. A análise de componentes principais usa a variação absoluta para calcular a variação geral explicada para cada componente principal, portanto, é importante que as características estejam em uma escala semelhante (a menos que exixsta algum motivo específico para que uma característica seja ponderada com maior peso).
+
+As características serão padronizadas, isto é, serão transformadas para obter média zero e desvio padrão um.
+
+```{r, warning=FALSE}
+# Centraliza e padroniza as três colunas
+car_acc_standised <- car_new %>% 
+  mutate(`% - Velocidade` = scale(`% - Velocidade`),
+         `% - Alcoolizado` = scale(`% - Alcoolizado`),
+         `% - Não Reincidente` = scale(`% - Não Reincidente`))
+
+# PCA
+pca_fit <- princomp(car_acc_standised[,c("% - Velocidade", "% - Alcoolizado",
+                                         "% - Não Reincidente")])
+
+# Proporção de variância explicada por cada componente
+(pr_var <- pca_fit$sdev^2)
+(pve <- pr_var / sum(pr_var))
+cumsum(pve/sum(pve))
+
+# Scree-Plot
+data_frame(comp_id=1:length(pve), y=cumsum(pve/sum(pve))) %>%
+  ggplot(aes(x=comp_id , y=y)) + geom_point() + geom_line() +
+  coord_cartesian(ylim=c(0,1)) +
+  labs(x="Número de Componentes Principais", 
+       y="Percentual de Variância Explicada Acumulada") + theme_bw() + 
+  scale_x_continuous(breaks = 1:3) +
+  scale_y_continuous(breaks = seq(0,1,.1), labels = scales::percent) +
+  geom_hline(yintercept = .7, linetype = 2, col = "#A11D21")
+
+# Cálculo da proporção acumulada da variância explicada pelas componentes
+# variãncia explicada por 2 componentes
+cve <- cumsum(pve)
+(cve_pc2 <- cve[2])
+```
+
+# 7. Visualizando as duas primeiras componentes principais
+
+As duas primeiras componentes principais permitem a visualização dos dados em duas dimensões, capturando uma alta proporção da variação (79%) das três características: velocidade, influência do álcool e acidentes pela primeira vez. Isso permite tentar discernir padrões nos dados com o objetivo de encontrar grupos de estados semelhantes no país. Embora os algoritmos de agrupamento estejam se tornando cada vez mais eficientes, o reconhecimento humano de padrões é um método facilmente acessível e muito eficiente de avaliar padrões nos dados.
+
+Criou-se um gráfico de dispersão das componentes principais e será explorado como os estados se agrupam nessa visualização.
+
+```{r warning=FALSE, message=FALSE}
+# Duas primeiras componentes
+pcomp1 <- pca_fit$scores[,1]
+pcomp2 <- pca_fit$scores[,2]
+
+# Plotando as duas primeiras componentes com autoplot
+require(ggfortify)
+row.names(car_new) <- car_new$Estado
+autoplot(pca_fit, data = car_new, loadings = TRUE,
+         loadings.colour = "#A11D21", loadings.label = TRUE,
+         loadings.label.size = 3, label = TRUE, shape = FALSE) +
+  labs(x="Componente Principal 1 (45,7%)", 
+       y="Componente Principal 2 (33,8%)") +
+  theme_bw() +
+  coord_cartesian(ylim = c(-.35,.35), xlim = c(-.35,.35)) +
+  scale_x_continuous(breaks = seq(-.35,.35,.05), 
+                     labels = paste(round(seq(-.35,.35,.05),2))) +
+  scale_y_continuous(breaks = seq(-.35,.35,.05), 
+                     labels = paste(round(seq(-.35,.35,.05),2))) +
+  geom_hline(yintercept = 0, col = "#003366") +
+  geom_vline(xintercept = 0, col = "#003366")
+```
+
+# 8. Encontrar *clusters* de estados semelhantes pelos dados
+
+Não ficou totalmente claro no gráfico de dispersão das componentes principais em quantos grupos os estados se agrupam. Para ajudar na identificação de um número razoável de *clusters*, pode-se usar o algoritmo *KMeans*, criando um *scree-plot* e localizando o "cotovelo" (*elbow*), que é uma indicação de quando a adição de mais clusters não adiciona muito poder explicativo.
+
+```{r}
+# Vetor de 1 a 10
+k_vec <- 1:10
+
+# Vetor de inércias
+inertias <- rep(NA, length(k_vec))
+
+# Lista para kmeans 
+mykm <- list()
+
+# Kmeans é aleatório, para reproducibilidade fixa-se uma semente
+set.seed(1)
+for (k in k_vec) {
+  # Salva o cluster em mykm
+  mykm[[k]] <- kmeans(car_acc_standised[,c(3,4,5)], centers = k, nstart=50)
+  # Armazena a soma de quadrados
+  inertias[k] <- mykm[[k]]$tot.withinss           
+}
+
+# Scree-plot
+data_frame(k_vec,inertias) %>%
+  ggplot(aes(k_vec, inertias) ) +
+  geom_point() + geom_line() + 
+  geom_hline(yintercept = 80, col = "#A11D21", linetype = 2) +
+  labs(x="Número de clusters", 
+       y="Soma de Quadrados Total intra-Cluster") +
+  theme_bw() +
+  scale_x_continuous(breaks = 1:10) +
+  scale_y_continuous(breaks = seq(0,150,10))
+```
+
+# 9. *KMeans* para visualizar clusters no gráfico de dispersão de componentes principais
+
+Como não houve um cotovelo claro no *scree-plot*, atribuir os estados em dois ou três grupos é uma escolha razoável, e a análise será feita usando três grupos. Verifica-se como fica o gráfico de dispersão de componentes principais se colorir os estados de acordo com o cluster ao qual eles estão designados.
+
+```{r}
+# Obtenha cluster-ids de kmeans fit com k=3
+cluster_id <- as.factor(mykm[[3]]$cluster)
+car_new$cluster <- cluster_id
+
+# Colorir de acordo com o cluster o gráfico de componentes principais
+autoplot(pca_fit, data = car_new, loadings = TRUE,
+         loadings.colour = "#A11D21", loadings.label = TRUE,
+         loadings.label.size = 3, label = TRUE, shape = FALSE,
+         colour = 'cluster') +
+  labs(x="Componente Principal 1 (45,7%)", 
+       y="Componente Principal 2 (33,8%)",
+       color = "Cluster") +
+  theme_bw() +
+  coord_cartesian(ylim = c(-.35,.35), xlim = c(-.35,.35)) +
+  scale_x_continuous(breaks = seq(-.35,.35,.05), 
+                     labels = paste(round(seq(-.35,.35,.05),2))) +
+  scale_y_continuous(breaks = seq(-.35,.35,.05), 
+                     labels = paste(round(seq(-.35,.35,.05),2))) +
+  geom_hline(yintercept = 0, col = "#003366") +
+  geom_vline(xintercept = 0, col = "#003366")
+```
+
+# 10. Visualiza as diferenças das características entre os *clusters*
+
+Até o momento, usou-se interpretação visual dos dados e o algoritmo de clusterização *KMeans* para revelar padrões nos dados, mas o que esses padrões significam?
+
+Lembre-se de que as informações usadas para agrupar os estados em três grupos distintos são a porcentagem de motoristas em alta velocidade, sob influência de álcool e que não foram envolvidos anteriormente em um acidente. Usa-se esses *clusters* para visualizar como os estados se agrupam ao considerar as duas primeiras componentes principais. Isso é bom para entender a estrutura dos dados, mas nem sempre é fácil de entender, especialmente se as conclusões devem ser comunicadas a um público não especialista.
+
+Um próximo passo razoável em nossa análise é explorar como os três clusteres são diferentes em termos das três características que usou-se para o armazenamento do *cluster*. Em vez de usar os recursos iguamente dimensionados, volta-se a usar os recursos não dimensionados para ajudar a interpretar as diferenças.
+
+```{r}
+# Transformar o banco em formato longo
+car_new %>%
+  select(-`Taxa Fatal`) %>% 
+  gather(key=feature, value=percent, -Estado, -cluster) %>%
+  ggplot(aes(x=feature,y=percent, fill=cluster)) +
+  geom_boxplot() +
+  coord_flip() +
+  labs(y = "Percentual", x = "Variável", fill = "Cluster") +
+  theme_bw()
+```
+
+# 11. Método de Clusterização Hierárquica
+
+Com o intuito de comparação, será realizado um método de clusterização hierárquico. Em seguida, os resultados serão comparados com a clusterização pelo método *KMeans*.
+
+```{r, message=FALSE, warning=FALSE}
+per_cols <- car_new %>% select(starts_with("%")) %>%
+  dist(method = "manhattan")
+
+hclust_obj <- hclust(per_cols, method = "complete")
+
+require(dendextend)
+require(colorspace)
+```
+
+```{r, warning=FALSE, message=FALSE}
+dend_obj <- as.dendrogram(hclust_obj)
+dend_col <- color_branches(dend_obj, k = 3)
+dend_obj %>% color_branches(k = 3) %>% color_labels(k = 3) %>%
+  set("labels_cex",.75) %>% plot()
+```
+
+## 11.1. Comparação entre *KMeans* e *Cluster* Hierárquico
+
+```{r, warning=FALSE, message=FALSE}
+car_new$hcluster <- factor(cutree(hclust_obj, k = 3))
+g1 <- autoplot(pca_fit, data = car_new, loadings = TRUE,
+               loadings.colour = "#A11D21", loadings.label = TRUE,
+               loadings.label.size = 3, label = TRUE, shape = FALSE,
+               colour = 'cluster') +
+  labs(x="Componente Principal 1 (45,7%)", 
+       y="Componente Principal 2 (33,8%)",
+       color = "Cluster KMeans") +
+  theme_bw() +
+  coord_cartesian(ylim = c(-.35,.35), xlim = c(-.35,.35)) +
+  scale_x_continuous(breaks = seq(-.35,.35,.05), 
+                     labels = paste(round(seq(-.35,.35,.05),2))) +
+  scale_y_continuous(breaks = seq(-.35,.35,.05), 
+                     labels = paste(round(seq(-.35,.35,.05),2))) +
+  geom_hline(yintercept = 0, col = "#003366") +
+  geom_vline(xintercept = 0, col = "#003366")
+g2 <- autoplot(pca_fit, data = car_new, loadings = TRUE,
+               loadings.colour = "#A11D21", loadings.label = TRUE,
+               loadings.label.size = 3, label = TRUE, shape = FALSE,
+               colour = 'hcluster') +
+  labs(x="Componente Principal 1 (45,7%)", 
+       y="Componente Principal 2 (33,8%)",
+       color = "Cluster Hierárquico") +
+  theme_bw() +
+  coord_cartesian(ylim = c(-.35,.35), xlim = c(-.35,.35)) +
+  scale_x_continuous(breaks = seq(-.35,.35,.05), 
+                     labels = paste(round(seq(-.35,.35,.05),2))) +
+  scale_y_continuous(breaks = seq(-.35,.35,.05), 
+                     labels = paste(round(seq(-.35,.35,.05),2))) +
+  geom_hline(yintercept = 0, col = "#003366") +
+  geom_vline(xintercept = 0, col = "#003366")
+g1; g2
+```
+
+# 12. Mapas
+
+Foram elaborados 2 mapas:
+
+- O primeiro é um mapa de calor das taxas fatais por estado;
+- Já o segundo é um mapa em que cada cor representa um *cluster*.
+
+```{r, message=FALSE, warning=FALSE}
+require(usmap)
+colnames(car_new)[1] <- 'state'
+## Gráfico 1 - Taxa Fatal
+plot_usmap(data = car_new, values = "Taxa Fatal", color = 'black', 
+           labels = TRUE) +
+  scale_fill_continuous(low = 'white', high = 'darkred',
+                        name = "Taxa Fatal", 
+                        label = scales::comma) + 
+  theme(legend.position = "right")
+## Gráfico 2 - Taxa Fatal
+plot_usmap(data = car_new, values = "cluster", color = 'black', labels = TRUE) +
+  scale_fill_discrete(name = "Cluster") + 
+  theme(legend.position = "right")
+```
+
+# 13. Calcula o número de acidentes em cada *cluster*
+
+Agora está claro que diferentes grupos de estados podem exigir intervenções diferentes. Como os recursos e o tempo são limitados, é útil começar com uma intervenção em um dos três grupos primeiro. Que grupo seria esse? Para determinar isso, serão incluídos dados sobre quantas milhas são percorridas em cada estado, pois isso ajudará a calcular o número total de acidentes fatais em cada estado. Os dados sobre milhas percorridas estão disponíveis em outro arquivo de texto delimitado por tabulação. Atribui essas novas informações a uma coluna no quadro de dados e cria-se um *boxplot* para quantos acidentes de trânsito fatais totais existem em cada cluster de estado.
+
+```{r, message=FALSE}
+# Lendo o arquivo miles-driven.csv
+miles_driven <- read_delim( file="miles-driven.txt", delim = '|')
+
+# Juntar miles_driven com car_acc and add num_drvr_fatl_col 
+car_acc_joined <- car_acc  %>% 
+  left_join(miles_driven, by="state") %>% 
+  mutate(num_drvr_fatl_col= drvr_fatl_col_bmiles*million_miles_annually/1000)
+
+# Agrupa o dataframe e resume os dados
+car_acc_joined$cluster <- cluster_id
+car_acc_joined_summ <- car_acc_joined %>%
+  group_by(cluster) %>%
+  select(cluster,num_drvr_fatl_col) %>%
+  summarise("Quantidade de Estados"=n(),
+            "Média de Acidentes" = mean(num_drvr_fatl_col),
+            Soma=sum(num_drvr_fatl_col))
+car_acc_joined_summ %>% kable() %>% kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+
+# Compara o total de acidentes usando barplot
+car_acc_joined_summ %>%
+  ggplot(aes(x=cluster, y=Soma)) +
+  geom_bar(aes(fill = cluster), stat = 'identity', 
+           show.legend = F, width = .5) +
+  geom_text(aes(y = round(Soma) + 500, label = paste0(round(Soma))), 
+            vjust=0, size = 4) +
+  theme_bw() + labs(x = "Cluster", y = "Total de Acidentes Fatais")
+```
+
+# 14. Escolha do *cluster* para aplicação da política pública inicial
+
+Pela tabela resumo mostrada anteriormente, é possível verificar pela média que não há uma diferença marcante no número total de acidentes por cluster, porém os clusters estão agrupados de forma que os problemas relacionados aos percentuais de motoristas correndo acima da velocidade, alcoolizados e não reincidentes é próximo, logo poderia escolher o cluster com o maior número de estados e o que teve a maior quantidade total de acidentes, ou seja, os estados a serem tratados seriam os do cluster `r car_acc_joined_summ$cluster[which.max(car_acc_joined_summ$Soma)]`.
